@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>AGIS Earth Engine</title>
+    
+    <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
+    <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+    
+    <script src="https://cdn.jsdelivr.net/npm/geotiff@2.1.3/dist-browser/geotiff.js"></script>
+
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.25.0/full/pyodide.js"></script>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js"></script>
+
+    <style>
+        /* Dracula Theme Colors */
+        :root { --bg: #282a36; --current: #44475a; --fg: #f8f8f2; --comment: #6272a4; --cyan: #8be9fd; --green: #50fa7b; --orange: #ffb86c; --purple: #bd93f9; --red: #ff5555; }
+        body { margin: 0; display: flex; flex-direction: column; height: 100vh; font-family: 'Segoe UI', sans-serif; background: var(--bg); color: var(--fg); overflow: hidden; }
+        
+        /* Loading Overlay */
+        #loading-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(40, 42, 54, 0.95); z-index: 9999; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+        .spinner { border: 4px solid var(--current); border-top: 4px solid var(--purple); border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin-bottom: 20px; }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+
+        /* Toolbar */
+        #toolbar { height: 40px; background: #1e1f29; display: flex; align-items: center; padding: 0 15px; border-bottom: 1px solid var(--current); flex-shrink: 0;}
+        .btn-run { background: var(--purple); color: white; border: none; padding: 6px 15px; border-radius: 4px; font-weight: bold; cursor: pointer; display: flex; align-items: center; gap: 5px; }
+        .btn-run:hover { background: #9d65ff; }
+        .btn-run:disabled { background: var(--current); cursor: not-allowed; }
+
+        /* Main Split */
+        #main-layout { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+        
+        /* 🚀 NEW: Resizer Elements */
+        .resizer-x { width: 6px; background: var(--current); cursor: col-resize; z-index: 10; transition: background 0.2s; }
+        .resizer-x:hover, .resizer-x:active { background: var(--purple); }
+        .resizer-y { height: 6px; background: var(--current); cursor: row-resize; z-index: 10; transition: background 0.2s; }
+        .resizer-y:hover, .resizer-y:active { background: var(--purple); }
+        
+        /* TOP ROW */
+        #top-row { display: flex; height: 55%; min-height: 100px; flex-shrink: 0; }
+        #env-pane { width: 280px; min-width: 150px; background: #21222c; display: flex; flex-direction: column; flex-shrink: 0; }
+        .pane-header { padding: 8px 10px; font-size: 11px; font-weight: bold; text-transform: uppercase; color: var(--comment); border-bottom: 1px solid var(--current); background: #1e1f29; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;}
+        #var-list { padding: 10px; overflow-y: auto; flex: 1; }
+        
+        /* Variable Categories */
+        .category-title { font-size: 10px; color: var(--orange); text-transform: uppercase; font-weight: bold; margin: 10px 0 5px 0; border-bottom: 1px dashed var(--current); padding-bottom: 3px;}
+        .category-title:first-child { margin-top: 0; }
+        .var-item { font-family: monospace; font-size: 12px; padding: 5px 8px; background: var(--current); margin-bottom: 5px; border-radius: 3px; display: flex; justify-content: space-between; align-items: center;}
+        .var-type { color: var(--cyan); font-size: 9px; opacity: 0.8; background: #1e1f29; padding: 2px 5px; border-radius: 3px; }
+        
+        #map-container { flex: 1; position: relative; min-width: 100px; }
+        #map { width: 100%; height: 100%; background: #000; }
+
+        /* BOTTOM ROW (IDE) */
+        #bottom-row { display: flex; flex: 1; min-height: 100px; background: var(--bg); }
+        #editor-container { flex: 1; display: flex; flex-direction: column; position: relative; min-width: 100px; }
+        #monaco-editor { flex: 1; width: 100%; }
+        
+        /* CONSOLE */
+        #console-container { width: 35%; min-width: 150px; display: flex; flex-direction: column; background: #1e1f29; flex-shrink: 0;}
+        #console-container.hidden { display: none; }
+        #console-output { flex: 1; padding: 10px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 12px; white-space: pre-wrap; line-height: 1.4; }
+        .log-info { color: var(--fg); }
+        .log-error { color: var(--red); }
+        .log-sys { color: var(--green); }
+
+        .icon-btn { background: transparent; border: none; color: var(--comment); cursor: pointer; font-size: 12px; }
+        .icon-btn:hover { color: var(--fg); }
+    </style>
+</head>
+<body>
+
+    <div id="loading-overlay">
+        <div class="spinner"></div>
+        <h3 style="margin:0;">Booting Python Engine...</h3>
+        <p style="color: var(--comment); font-size: 12px;">Loading WebAssembly and GeoTIFF Decoders...</p>
+    </div>
+
+    <div id="toolbar">
+        <div style="font-weight: bold; color: var(--green); margin-right: 20px;">AGIS Earth Engine</div>
+        <button id="btn-run" class="btn-run" disabled>▶ Run Script</button>
+    </div>
+
+    <div id="main-layout">
+        <div id="top-row">
+            <div id="env-pane">
+                <div class="pane-header">Environment Variables</div>
+                <div id="var-list"><div style="color:var(--comment); font-size: 11px;">Run a script to populate.</div></div>
+            </div>
+            
+            <div class="resizer-x" id="drag-v1"></div>
+            
+            <div id="map-container"><div id="map"></div></div>
+        </div>
+
+        <div class="resizer-y" id="drag-h"></div>
+
+        <div id="bottom-row">
+            <div id="editor-container">
+                <div class="pane-header">
+                    <span>Code Editor</span>
+                    <button class="icon-btn" id="toggle-console-btn" onclick="toggleConsole()">Hide Console ◧</button>
+                </div>
+                <div id="monaco-editor"></div>
+            </div>
+            
+            <div class="resizer-x" id="drag-v2"></div>
+            
+            <div id="console-container">
+                <div class="pane-header">
+                    <span>Terminal</span>
+                    <button class="icon-btn" onclick="document.getElementById('console-output').innerHTML=''">Clear 🗑️</button>
+                </div>
+                <div id="console-output"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- 🚀 NEW: Resizer Drag Logic ---
+        function makeResizable(resizerElement, leftOrTopElement, direction, isReverse = false) {
+            let startPos = 0, startSize = 0;
+            
+            const mouseMoveHandler = function(e) {
+                if (direction === 'H') {
+                    // Resizing Top vs Bottom (Horizontal Splitter changes Height)
+                    const dy = e.clientY - startPos;
+                    leftOrTopElement.style.height = `${startSize + dy}px`;
+                    leftOrTopElement.style.flex = "none";
+                } else {
+                    // Resizing Left vs Right (Vertical Splitter changes Width)
+                    const dx = isReverse ? (startPos - e.clientX) : (e.clientX - startPos);
+                    leftOrTopElement.style.width = `${startSize + dx}px`;
+                    leftOrTopElement.style.flex = "none";
+                }
+                
+                // Force editors and maps to recalculate layout mid-drag
+                if (window.editor) window.editor.layout();
+                if (window.map) window.map.resize();
+            };
+
+            const mouseUpHandler = function() {
+                document.removeEventListener('mousemove', mouseMoveHandler);
+                document.removeEventListener('mouseup', mouseUpHandler);
+                document.body.style.cursor = 'default';
+                document.body.style.userSelect = 'auto'; // Re-enable text selection
+            };
+
+            resizerElement.addEventListener('mousedown', function(e) {
+                startPos = direction === 'H' ? e.clientY : e.clientX;
+                const rect = leftOrTopElement.getBoundingClientRect();
+                startSize = direction === 'H' ? rect.height : rect.width;
+                
+                document.body.style.cursor = direction === 'H' ? 'row-resize' : 'col-resize';
+                document.body.style.userSelect = 'none'; // Prevent text highlighting while dragging
+                
+                document.addEventListener('mousemove', mouseMoveHandler);
+                document.addEventListener('mouseup', mouseUpHandler);
+            });
+        }
+
+        // Attach Resizers
+        makeResizable(document.getElementById('drag-h'), document.getElementById('top-row'), 'H');
+        makeResizable(document.getElementById('drag-v1'), document.getElementById('env-pane'), 'V');
+        // For the bottom right console, we want the right-side element to resize backwards
+        makeResizable(document.getElementById('drag-v2'), document.getElementById('console-container'), 'V', true);
+
+        // --- 1. Terminal / Console Logic ---
+        const terminal = document.getElementById('console-output');
+        window.printToConsole = function(text, type="info") {
+            const span = document.createElement('span');
+            span.className = `log-${type}`;
+            span.innerText = text;
+            terminal.appendChild(span);
+            terminal.scrollTop = terminal.scrollHeight;
+        };
+
+        window.toggleConsole = function() {
+            const consoleDiv = document.getElementById('console-container');
+            const resizer = document.getElementById('drag-v2');
+            const btn = document.getElementById('toggle-console-btn');
+            const isHidden = consoleDiv.classList.toggle('hidden');
+            
+            resizer.style.display = isHidden ? 'none' : 'block';
+            btn.innerText = isHidden ? 'Show Console ◨' : 'Hide Console ◧';
+            setTimeout(() => { if (window.editor) window.editor.layout(); }, 300);
+        };
+
+        // --- 🚀 NEW: Categorized Environment UI ---
+        window.renderEnvironmentUI = function(jsonStr) {
+            const envData = JSON.parse(jsonStr);
+            const list = document.getElementById('var-list');
+            list.innerHTML = '';
+            
+            if (envData.layers.length === 0 && envData.other.length === 0) {
+                list.innerHTML = '<div style="color:var(--comment); font-size: 11px;">No variables in memory.</div>';
+                return;
+            }
+
+            // Render Layers
+            if (envData.layers.length > 0) {
+                list.innerHTML += `<div class="category-title">🌍 Map & Data Layers</div>`;
+                envData.layers.forEach(v => {
+                    list.innerHTML += `<div class="var-item"><span>${v.name}</span><span class="var-type">${v.type}</span></div>`;
+                });
+            }
+
+            // Render Standard Variables
+            if (envData.other.length > 0) {
+                list.innerHTML += `<div class="category-title" style="margin-top:15px;">📦 Standard Variables</div>`;
+                envData.other.forEach(v => {
+                    list.innerHTML += `<div class="var-item"><span>${v.name}</span><span class="var-type">${v.type}</span></div>`;
+                });
+            }
+        };
+
+        // --- 2. MapLibre Initialization ---
+        window.map = new maplibregl.Map({
+            container: 'map',
+            style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+            center: [-84.3880, 33.7490], zoom: 11, pitch: 0
+        });
+
+        // GeoTIFF to WebGL Bridge
+        window.renderGeoTiffLayer = async function(layerId, url, bboxStr) {
+            try {
+                const bbox = Array.from(bboxStr); 
+                const tiff = await GeoTIFF.fromUrl(url);
+                const imageCount = await tiff.getImageCount();
+                const image = await tiff.getImage(Math.min(2, imageCount - 1));
+                const rasters = await image.readRasters({ width: 512, height: 512 });
+                
+                const canvas = document.createElement('canvas');
+                canvas.width = 512; canvas.height = 512;
+                const ctx = canvas.getContext('2d');
+                const imgData = ctx.createImageData(512, 512);
+                
+                for (let i = 0; i < rasters[0].length; i++) {
+                    const idx = i * 4;
+                    imgData.data[idx] = rasters[0][i];
+                    imgData.data[idx+1] = rasters[1] ? rasters[1][i] : rasters[0][i];
+                    imgData.data[idx+2] = rasters[2] ? rasters[2][i] : rasters[0][i];
+                    imgData.data[idx+3] = 255;
+                }
+                ctx.putImageData(imgData, 0, 0);
+                
+                const coordinates = [[bbox[0], bbox[3]], [bbox[2], bbox[3]], [bbox[2], bbox[1]], [bbox[0], bbox[1]]];
+                
+                if (window.map.getSource(layerId)) {
+                    window.map.getSource(layerId).updateImage({ url: canvas.toDataURL(), coordinates });
+                } else {
+                    window.map.addSource(layerId, { type: 'image', url: canvas.toDataURL(), coordinates });
+                    window.map.addLayer({ id: layerId + '-layer', type: 'raster', source: layerId });
+                }
+                
+                window.map.fitBounds([[bbox[0], bbox[1]], [bbox[2], bbox[3]]], { padding: 40 });
+                window.printToConsole(`✅ Successfully rendered ${layerId} to MapLibre Canvas.\n`, "sys");
+
+            } catch(e) { window.printToConsole(`❌ Error rendering GeoTIFF: ${e}\n`, "error"); }
+        }
+
+        // --- 3. Monaco Editor Initialization ---
+        const AUTO_START_SCRIPT = `import pyodide.http
+import json
+import js
+
+# Set up simple variables (these will sort into "Standard Variables")
+catalog = "https://planetarycomputer.microsoft.com/api/stac/v1/search"
+proxy_base = "https://agis.sweetxander.workers.dev/?url="
+city_name = "Atlanta"
+max_clouds = 10
+
+print(f"🔍 Querying MS Planetary Computer over {city_name}...")
+
+query = {
+    "collections": ["naip"],
+    "bbox": [-84.45, 33.70, -84.30, 33.80],
+    "limit": 1
+}
+
+res = await pyodide.http.pyfetch(catalog, method="POST", body=json.dumps(query), headers={"Content-Type": "application/json"})
+data = await res.json()
+naip_feature = data["features"][0] # This will sort into "Data Layers"
+
+print(f"✅ Found NAIP image from {naip_feature['properties']['datetime']}")
+print("🔑 Fetching Microsoft SAS Token...")
+
+sas_res = await pyodide.http.pyfetch("https://planetarycomputer.microsoft.com/api/sas/v1/token/naip")
+sas_token = (await sas_res.json())["token"]
+
+raw_asset_url = naip_feature["assets"]["image"]["href"]
+proxied_asset_url = f"{proxy_base}{raw_asset_url}?{sas_token}"
+
+print(f"🚀 Passing proxied URL to MapLibre WebGL Engine...")
+js.window.renderGeoTiffLayer("naip-layer", proxied_asset_url, naip_feature["bbox"])
+`;
+
+        require.config({ paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs' }});
+        require(['vs/editor/editor.main'], function() {
+            window.editor = monaco.editor.create(document.getElementById('monaco-editor'), {
+                value: AUTO_START_SCRIPT,
+                language: 'python',
+                theme: 'vs-dark',
+                automaticLayout: true,
+                minimap: { enabled: false }
+            });
+        });
+
+        // --- 4. Pyodide Initialization ---
+        async function initEngine() {
+            window.printToConsole("Initializing Pyodide WASM...\n", "sys");
+            window.pyodide = await loadPyodide();
+            
+            await pyodide.runPythonAsync(`
+                import sys, js, json
+                
+                class JSConsole:
+                    def write(self, t): 
+                        if t.strip(): js.printToConsole(t + '\\n', "info")
+                    def flush(self): pass
+                class JSErrorConsole:
+                    def write(self, t): 
+                        if t.strip(): js.printToConsole(t + '\\n', "error")
+                    def flush(self): pass
+                
+                sys.stdout, sys.stderr = JSConsole(), JSErrorConsole()
+
+                # 🚀 NEW: Categorized Variable Sorting
+                def _update_env():
+                    data_types = ['GeoDataFrame', 'DataFrame', 'DataArray', 'Dataset', 'ndarray', 'dict', 'FeatureCollection']
+                    env_data = {"layers": [], "other": []}
+                    ignore_list = ['js', 'sys', 'json', 'JSConsole', 'JSErrorConsole', '_update_env']
+                    
+                    for k, v in globals().items():
+                        if not k.startswith('_') and k not in ignore_list:
+                            t = type(v).__name__
+                            # Filter out system modules entirely
+                            if t == "module" or t == "function": continue
+                            
+                            if t in data_types or "feature" in k.lower():
+                                env_data["layers"].append({"name": k, "type": t})
+                            else:
+                                env_data["other"].append({"name": k, "type": t})
+                                
+                    js.renderEnvironmentUI(json.dumps(env_data))
+            `);
+
+            document.getElementById('loading-overlay').style.display = 'none';
+            window.printToConsole("System Ready.\n", "sys");
+            
+            const runBtn = document.getElementById('btn-run');
+            runBtn.disabled = false;
+
+            runBtn.addEventListener('click', async () => {
+                if(!window.editor) return;
+                runBtn.disabled = true; runBtn.innerText = "⏳ Running...";
+                window.printToConsole("> Running script...\n", "sys");
+                
+                try {
+                    await pyodide.runPythonAsync(window.editor.getValue());
+                    await pyodide.runPythonAsync("_update_env()");
+                } catch (err) { console.error(err); } 
+                finally { runBtn.disabled = false; runBtn.innerText = "▶ Run Script"; }
+            });
+        }
+        initEngine();
+    </script>
+</body>
+</html>
