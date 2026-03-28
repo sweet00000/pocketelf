@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Multi-Threaded Agent Playground</title>
+    <style>
+        body { font-family: system-ui; background: #1e1e1e; color: #eee; display: flex; height: 100vh; margin: 0; }
+        .panel { flex: 1; display: flex; flex-direction: column; padding: 20px; border-right: 1px solid #333; }
+        textarea { flex: 1; background: #2d2d2d; color: #fff; border: 1px solid #444; padding: 10px; font-family: monospace; font-size: 13px; margin-bottom: 10px; }
+        .chat-log { flex: 2; background: #000; padding: 10px; overflow-y: auto; font-family: monospace; font-size: 13px; border: 1px solid #444; margin-bottom: 10px; white-space: pre-wrap; }
+        input[type="text"] { background: #2d2d2d; color: #fff; border: 1px solid #444; padding: 10px; font-size: 14px; }
+        button { background: #007acc; color: white; border: none; padding: 10px; cursor: pointer; font-weight: bold; }
+        .sys-log { color: #f1fa8c; } .agent-log { color: #50fa7b; }
+    </style>
+</head>
+<body>
+
+    <div class="panel">
+        <h3>1. RAG Context</h3>
+        <textarea id="rag-context">{"workflows": {"naip_imagery": {"requires": ["bbox", "year"]}}}</textarea>
+        <h3>2. System Prompt</h3>
+        <textarea id="system-prompt" style="flex: 0.5;">You are a strict data extraction router. Output ONLY valid JSON.</textarea>
+    </div>
+
+    <div class="panel">
+        <h3>Agent Debug Log</h3>
+        <div id="debug-log" class="chat-log">Initializing Web Workers...</div>
+        <div style="display: flex; gap: 10px;">
+            <input type="text" id="chat-input" placeholder="Type a request..." style="flex: 1;" disabled>
+            <button id="send-btn" onclick="handleSend()" disabled>Send</button>
+        </div>
+    </div>
+
+    <script>
+        const debugLog = document.getElementById('debug-log');
+        const chatInput = document.getElementById('chat-input');
+        const sendBtn = document.getElementById('send-btn');
+        let pyReady = false, aiReady = false;
+
+        function logToUI(msg, type="sys-log") {
+            debugLog.innerHTML += `<span class="${type}">${msg}</span>\n`;
+            debugLog.scrollTop = debugLog.scrollHeight;
+        }
+
+        // 1. Boot the Workers
+        // Note: Transformers.js requires type: "module"
+        const aiWorker = new Worker('ai_worker.js', { type: 'module' });
+        const pyWorker = new Worker('py_worker.js');
+
+        // 2. Setup The Router (Main Thread)
+        
+        // Listen to AI Worker
+        aiWorker.onmessage = (e) => {
+            if (e.data.type === 'LOG') logToUI(e.data.msg, e.data.logType);
+            if (e.data.type === 'INIT_DONE') {
+                aiReady = true;
+                logToUI("[System] AI Engine Ready.", "sys-log");
+                checkReady();
+            }
+            // Route AI text back to Python
+            if (e.data.type === 'GENERATE_DONE') {
+                pyWorker.postMessage({ type: 'LLM_REPLY', id: e.data.id, text: e.data.text });
+            }
+        };
+
+        // Listen to Python Worker
+        pyWorker.onmessage = (e) => {
+            if (e.data.type === 'LOG') logToUI(e.data.msg, e.data.logType);
+            if (e.data.type === 'INIT_DONE') {
+                pyReady = true;
+                logToUI("[System] Pyodide Ready.", "sys-log");
+                checkReady();
+            }
+            // Route Python's LLM request to the AI Worker
+            if (e.data.type === 'REQUEST_LLM') {
+                aiWorker.postMessage({ 
+                    type: 'GENERATE', 
+                    id: e.data.id, 
+                    systemPrompt: e.data.systemPrompt, 
+                    userPrompt: e.data.userPrompt 
+                });
+            }
+        };
+
+        // 3. Start initialization in parallel
+        aiWorker.postMessage({ type: 'INIT' });
+        pyWorker.postMessage({ type: 'INIT' });
+
+        function checkReady() {
+            if (pyReady && aiReady) {
+                chatInput.disabled = false;
+                sendBtn.disabled = false;
+                logToUI("\\n--- SYSTEM FULLY ONLINE ---", "agent-log");
+            }
+        }
+
+        // 4. Handle User Input
+        window.handleSend = function() {
+            const msg = chatInput.value;
+            if (!msg) return;
+            chatInput.value = "";
+            logToUI(`\n> User: ${msg}`, "sys-log");
+            
+            // Send everything to the Python worker to start the PocketFlow
+            pyWorker.postMessage({
+                type: 'RUN_FLOW',
+                msg: msg,
+                rag: document.getElementById('rag-context').value,
+                sys: document.getElementById('system-prompt').value
+            });
+        };
+    </script>
+</body>
+</html>
